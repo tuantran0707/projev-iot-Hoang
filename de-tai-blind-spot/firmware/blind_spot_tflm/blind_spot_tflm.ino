@@ -256,19 +256,21 @@ void handleRoot() {
     "cam.onerror=()=>{cam.src='';setTimeout(startStream,800);};startStream();"
     "setInterval(async()=>{try{let r=await fetch('/status');let j=await r.json();"
     "let L=document.getElementById('L'),R=document.getElementById('R');"
+    // ĐỎ NGAY theo con số %: hễ >=60% là báo đỏ tức thì, không chờ debounce phần cứng
+    "let aL=j.l>=0.6,aR=j.r>=0.6;"
     "L.textContent='TRÁI: '+(j.l*100).toFixed(0)+'%';R.textContent='PHẢI: '+(j.r*100).toFixed(0)+'%';"
-    "L.className='box '+(j.la?'on':'off');R.className='box '+(j.ra?'on':'off');"
+    "L.className='box '+(aL?'on':'off');R.className='box '+(aR?'on':'off');"
     // khoanh vùng đỏ theo nửa phát hiện
-    "document.getElementById('zL').className='zone'+(j.la?' hit':'');"
-    "document.getElementById('zR').className='zone'+(j.ra?' hit':'');"
+    "document.getElementById('zL').className='zone'+(aL?' hit':'');"
+    "document.getElementById('zR').className='zone'+(aR?' hit':'');"
     // dòng log cảnh báo
     "let lg=document.getElementById('log');let m;"
-    "if(j.la&&j.ra){m='⚠️ PHÁT HIỆN VẬT THỂ CẢ HAI BÊN!';}"
-    "else if(j.la){m='⬅️ Phát hiện vật thể bên TRÁI';}"
-    "else if(j.ra){m='Phát hiện vật thể bên PHẢI ➡️';}"
+    "if(aL&&aR){m='⚠️ PHÁT HIỆN VẬT THỂ CẢ HAI BÊN!';}"
+    "else if(aL){m='⬅️ Phát hiện vật thể bên TRÁI';}"
+    "else if(aR){m='Phát hiện vật thể bên PHẢI ➡️';}"
     "else{m='An toàn — chưa phát hiện vật thể';}"
-    "lg.textContent=m;lg.className=(j.la||j.ra)?'alert':'';"
-    "}catch(e){}},250);</script></body></html>";
+    "lg.textContent=m;lg.className=(aL||aR)?'alert':'';"
+    "}catch(e){}},120);</script></body></html>";
   server.send(200, "text/html", html);
 }
 
@@ -336,11 +338,16 @@ void inferenceTask(void* pv) {
       fillInputFromHalf(fb, 0);  float pLeft  = classifyObjectProb();   // nửa TRÁI
       fillInputFromHalf(fb, 1);  float pRight = classifyObjectProb();   // nửa PHẢI
 
-      // LÀM MƯỢT xác suất theo thời gian (EMA) -> bớt nhiễu 1 khung, nhận diện ổn định.
+      // LÀM MƯỢT xác suất theo thời gian (EMA) BẤT ĐỐI XỨNG:
+      //  - Khi xác suất TĂNG -> bám rất nhanh (A_UP cao) => số vượt 60% gần như tức thì.
+      //  - Khi GIẢM -> hạ chậm hơn (A_DN) => bớt nhấp nháy khi mất tín hiệu 1 khung.
       static float emaL = 0.0f, emaR = 0.0f;
-      const float A = 0.5f;                 // hệ số làm mượt (0..1), cao = nhạy hơn
-      emaL = A * pLeft  + (1.0f - A) * emaL;
-      emaR = A * pRight + (1.0f - A) * emaR;
+      const float A_UP = 0.85f;   // tăng nhanh -> phát hiện tức thì
+      const float A_DN = 0.40f;   // giảm chậm -> ổn định, ít rung
+      float kL = (pLeft  > emaL) ? A_UP : A_DN;
+      float kR = (pRight > emaR) ? A_UP : A_DN;
+      emaL = kL * pLeft  + (1.0f - kL) * emaL;
+      emaR = kR * pRight + (1.0f - kR) * emaR;
 
       bool seenLeft  = emaL >= CONF_THRESHOLD;
       bool seenRight = emaR >= CONF_THRESHOLD;
@@ -407,7 +414,7 @@ void streamTask(void* pv) {
         client.print("\r\n");
         free(buf);
       }
-      vTaskDelay(pdMS_TO_TICKS(33));   // ~30 khung/giây tối đa
+      vTaskDelay(pdMS_TO_TICKS(20));   // ~50 khung/giây tối đa -> mượt hơn
     }
     client.stop();
   }
