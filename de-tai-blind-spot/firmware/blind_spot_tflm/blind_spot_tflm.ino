@@ -57,13 +57,11 @@ TaskHandle_t streamTaskHandle = nullptr;
 WiFiServer streamServer(81);
 
 // ----------------------- CHÂN GPIO CẢNH BÁO --------------------------------
-// ESP32-S3-N16-R8:
+// ESP32-S3-N16-R8 (KHÔNG phân biệt trái/phải nữa):
 // - Motor vibration: IO21
-// - Buzzer trái: IO47
-// - Buzzer phải: IO38
+// - Buzzer (1 cái): IO47
 #define PIN_MOTOR         21
-#define PIN_BUZZER_LEFT   47
-#define PIN_BUZZER_RIGHT  38
+#define PIN_BUZZER        47
 
 // ----------------------- THAM SỐ ------------------------------------------
 #define IMG_SIZE         96      // khớp với model train
@@ -104,7 +102,7 @@ namespace {
 
 // Trạng thái debounce
 int leftHits=0, rightHits=0, leftMiss=0, rightMiss=0;
-bool leftActive=false, rightActive=false;
+volatile bool leftActive=false, rightActive=false;   // đọc trong loop() (core 0) -> volatile
 
 // =========================================================================
 //                            KHỞI TẠO CAMERA
@@ -203,9 +201,22 @@ float classifyObjectProb() {
 // =========================================================================
 //                       LOGIC CẢNH BÁO THEO HƯỚNG
 // =========================================================================
-void setMotor(bool on) { digitalWrite(PIN_MOTOR, on?HIGH:LOW); }
+void setMotor(bool on) { digitalWrite(PIN_MOTOR, on?HIGH:LOW); }   // active-HIGH
+
+// ---- Buzzer thường (active-HIGH): 3.3V (HIGH) = KÊU, 0V (LOW) = IM ----
+// Điều khiển digital đơn giản, không cần LEDC. Idle = LOW để không kêu.
+void buzzerInit(int pin) {
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, LOW);    // LOW (0V) = im
+}
+
+void buzzerOn(int pin, bool on) {
+  digitalWrite(pin, on ? HIGH : LOW);   // HIGH (3.3V) = kêu, LOW = im
+}
 
 void updateAlert(bool seenLeft, bool seenRight) {
+  bool prevL = leftActive, prevR = rightActive;
+
   if (seenLeft) { leftHits++; leftMiss=0; } else { leftMiss++; leftHits=0; }
   if (leftHits>=DEBOUNCE_FRAMES) leftActive=true;
   if (leftMiss>=CLEAR_FRAMES)    leftActive=false;
@@ -214,13 +225,14 @@ void updateAlert(bool seenLeft, bool seenRight) {
   if (rightHits>=DEBOUNCE_FRAMES) rightActive=true;
   if (rightMiss>=CLEAR_FRAMES)    rightActive=false;
 
-  bool danger = leftActive || rightActive;
-  setMotor(danger);
+  // Phát hiện BẤT KỲ bên nào -> rung. Buzzer được lo() ở loop().
+  setMotor(leftActive || rightActive);
 
-  int period = (leftActive && rightActive) ? 120 : 250;
-  bool pulse = ((millis()/period)%2) != 0;
-  digitalWrite(PIN_BUZZER_LEFT, (leftActive && pulse) ? HIGH : LOW);
-  digitalWrite(PIN_BUZZER_RIGHT, (rightActive && pulse) ? HIGH : LOW);
+  if (prevL != leftActive || prevR != rightActive) {
+    Serial.printf("[ALERT] L=%s R=%s -> %s\n",
+        leftActive?"ON":"off", rightActive?"ON":"off",
+        (leftActive||rightActive)?"RUNG+KEU":"tat");
+  }
 }
 
 // =========================================================================
@@ -428,8 +440,14 @@ void setup() {
   delay(300);
 
   pinMode(PIN_MOTOR, OUTPUT);         setMotor(false);
-  pinMode(PIN_BUZZER_LEFT, OUTPUT);   digitalWrite(PIN_BUZZER_LEFT, LOW);
-  pinMode(PIN_BUZZER_RIGHT, OUTPUT);  digitalWrite(PIN_BUZZER_RIGHT, LOW);
+  buzzerInit(PIN_BUZZER);             buzzerOn(PIN_BUZZER, false);
+
+  // ---- SELF-TEST phần cứng lúc khởi động ----
+  // Giúp bạn biết NGAY dây motor/buzzer có đúng không (không phụ thuộc nhận diện).
+  Serial.println("Self-test: motor (IO21) rung, roi buzzer (IO47) keu...");
+  setMotor(true);  delay(500); setMotor(false); delay(200);
+  buzzerOn(PIN_BUZZER, true); delay(800); buzzerOn(PIN_BUZZER, false);
+  Serial.println("Self-test xong. Neu khong rung/keu -> kiem tra day, GND chung, nguon.");
 
   if (!camera_init()) { while(true) delay(1000); }
 
@@ -486,7 +504,16 @@ void setup() {
 // =========================================================================
 //                                 LOOP
 // =========================================================================
-// Mọi việc đã chuyển sang 2 task FreeRTOS ở trên -> loop() để rỗng.
+// Inference/web chạy trong task riêng. loop() lo nhịp KÊU của buzzer (passive cần nhịp
+// liên tục). Đọc cờ leftActive/rightActive (volatile) do task inference cập nhật.
 void loop() {
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  bool danger = leftActive || rightActive;       // phát hiện bất kỳ bên nào
+  if (danger) {
+    // Nhịp KÊU DÀI: bật lâu, nghỉ ngắn -> nghe rõ.
+    bool pulse = ((int)(millis() % 900)) < 700;   // 700ms kêu / 200ms nghỉ
+    buzzerOn(PIN_BUZZER, pulse);
+  } else {
+    buzzerOn(PIN_BUZZER, false);
+  }
+  vTaskDelay(pdMS_TO_TICKS(10));
 }
