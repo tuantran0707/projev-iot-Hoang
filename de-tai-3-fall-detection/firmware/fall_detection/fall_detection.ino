@@ -22,6 +22,27 @@
 #define PIN_BUTTON     5     // Nút bấm huỷ cảnh báo (INPUT_PULLUP -> nối GND)
 #define PIN_LED        2     // LED báo trạng thái (tuỳ chọn)
 
+// ----------------------- MÀN HÌNH TFT 2.8" (ILI9341) -----------------------
+// Hiển thị SPI (ILI9341). Chọn chân điều khiển KHÔNG trùng với MPU/motor/button/LED.
+#define TFT_MISO       12    // dùng chung SPI với cảm ứng (T_OUT)
+#define TFT_MOSI       13    // dùng chung SPI với cảm ứng (T_DIN)
+#define TFT_SCLK       14    // dùng chung SPI với cảm ứng (T_CLK)
+#define TFT_CS         15    // Chip select màn hình
+#define TFT_DC         16    // Data/Command màn hình
+#define TFT_RST        17    // Reset màn hình (đặt -1 nếu nối cứng vào EN)
+#define TFT_BL         18    // Đèn nền (backlight)
+
+// ----------------------- CẢM ỨNG ĐIỆN TRỞ (XPT2046) -----------------------
+#define XPT2046_IRQ    36    // T_IRQ
+#define XPT2046_MOSI   13    // T_DIN  (chung SPI với màn hình)
+#define XPT2046_MISO   12    // T_OUT  (chung SPI với màn hình)
+#define XPT2046_CLK    14    // T_CLK  (chung SPI với màn hình)
+#define XPT2046_CS     33    // T_CS
+
+#define SCREEN_WIDTH   240
+#define SCREEN_HEIGHT  320
+#define FONT_SIZE      2
+
 // ----------------------------- ĐỊA CHỈ MPU ---------------------------------
 #define MPU_ADDR       0x68  // AD0=GND -> 0x68 ; AD0=VCC -> 0x69
 #define REG_PWR_MGMT_1 0x6B

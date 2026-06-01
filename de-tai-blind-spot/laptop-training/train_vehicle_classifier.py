@@ -9,9 +9,9 @@ CÀI ĐẶT (1 lần):
     pip install tensorflow pillow numpy
 
 CHUẨN BỊ DỮ LIỆU:
-    dataset/
+    laptop-training/
         object/      <- ảnh CÓ vật thể (mô hình/đồ vật phía sau), đa dạng góc/sáng
-        none/        <- ảnh nền trống, KHÔNG có vật thể
+        empty/       <- ảnh nền trống, KHÔNG có vật thể
     (mỗi lớp nên >= 150-300 ảnh, chụp đúng góc camera thật)
 
 CHẠY:
@@ -24,16 +24,36 @@ KẾT QUẢ:
 """
 
 import os
+import sys
 import numpy as np
 import tensorflow as tf
+
+# Ép stdout sang UTF-8 để in được tiếng Việt trên console Windows (cp1252).
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 # ----------------------------- CẤU HÌNH -----------------------------------
 IMG_SIZE   = 96          # 96x96 — khớp với firmware ESP32-CAM
 CHANNELS   = 1           # grayscale cho nhẹ
 BATCH      = 16
 EPOCHS     = 30
-DATA_DIR   = "dataset"   # thư mục chứa object/ và none/
-CLASS_NAMES = ["none", "object"]   # 0 = none, 1 = object
+DATA_DIR   = "dataset"   # sẽ tự động resolve ở bên dưới
+CLASS_NAMES = ["empty", "object"]   # 0 = empty, 1 = object
+
+# Ưu tiên dùng dữ liệu ngay trong thư mục hiện tại (empty/object).
+# Nếu có thư mục dataset/ thì vẫn hỗ trợ để tương thích cách tổ chức cũ.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if os.path.isdir(os.path.join(SCRIPT_DIR, "dataset")):
+    DATA_DIR = os.path.join(SCRIPT_DIR, "dataset")
+else:
+    DATA_DIR = SCRIPT_DIR
+
+for cls in CLASS_NAMES:
+    cls_dir = os.path.join(DATA_DIR, cls)
+    if not os.path.isdir(cls_dir):
+        raise FileNotFoundError(f"Khong tim thay thu muc label: {cls_dir}")
 
 # ----------------------- TẢI & TIỀN XỬ LÝ DỮ LIỆU --------------------------
 train_ds = tf.keras.utils.image_dataset_from_directory(

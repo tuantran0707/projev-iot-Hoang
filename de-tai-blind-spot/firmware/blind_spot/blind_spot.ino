@@ -24,34 +24,36 @@
 #include "esp_camera.h"
 
 // ----------------------- CHÂN GPIO CẢNH BÁO --------------------------------
-// ESP32-CAM còn rất ít chân trống. Dùng các chân an toàn:
-#define PIN_BUZZER       12   // còi báo (qua transistor)
-#define PIN_MOTOR_LEFT   13   // motor rung bên TRÁI
-#define PIN_MOTOR_RIGHT  15   // motor rung bên PHẢI
-// (GPIO4 = đèn flash, GPIO0/2/14 hạn chế — kiểm tra kỹ board của bạn)
+// ESP32-S3-N16-R8:
+// - Motor vibration: IO21
+// - Buzzer trái: IO47
+// - Buzzer phải: IO38
+#define PIN_MOTOR         21
+#define PIN_BUZZER_LEFT   47
+#define PIN_BUZZER_RIGHT  38
 
 // ----------------------- THAM SỐ NHẬN DIỆN ---------------------------------
 #define CONF_THRESHOLD     0.6f   // ngưỡng tin cậy tối thiểu
 #define DEBOUNCE_FRAMES    3      // số khung liên tiếp mới cảnh báo
 #define CLEAR_FRAMES       3      // số khung "trống" để tắt cảnh báo
 
-// ----------------------- CHÂN CAMERA (AI-THINKER) --------------------------
-#define PWDN_GPIO_NUM     32
+// ----------------------- CHÂN CAMERA (ESP32-S3-CAM N16R8) ------------------
+#define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
+#define XCLK_GPIO_NUM     15
+#define SIOD_GPIO_NUM      4
+#define SIOC_GPIO_NUM      5
+#define Y9_GPIO_NUM       16
+#define Y8_GPIO_NUM       17
+#define Y7_GPIO_NUM       18
+#define Y6_GPIO_NUM       12
+#define Y5_GPIO_NUM       10
+#define Y4_GPIO_NUM        8
+#define Y3_GPIO_NUM        9
+#define Y2_GPIO_NUM       11
+#define VSYNC_GPIO_NUM     6
+#define HREF_GPIO_NUM      7
+#define PCLK_GPIO_NUM     13
 
 // ----------------------- BỘ ĐỆM ẢNH CHO INFERENCE --------------------------
 static bool     is_initialised = false;
@@ -143,8 +145,7 @@ int camera_get_data(size_t offset, size_t length, float *out_ptr) {
 // =========================================================================
 //                       LOGIC CẢNH BÁO THEO HƯỚNG
 // =========================================================================
-void setLeft(bool on)  { digitalWrite(PIN_MOTOR_LEFT,  on ? HIGH : LOW); }
-void setRight(bool on) { digitalWrite(PIN_MOTOR_RIGHT, on ? HIGH : LOW); }
+void setMotor(bool on) { digitalWrite(PIN_MOTOR, on ? HIGH : LOW); }
 
 void updateAlert(bool seenLeft, bool seenRight) {
   // --- bên trái ---
@@ -159,17 +160,14 @@ void updateAlert(bool seenLeft, bool seenRight) {
   if (rightHits >= DEBOUNCE_FRAMES) rightActive = true;
   if (rightMiss >= CLEAR_FRAMES)    rightActive = false;
 
-  setLeft(leftActive);
-  setRight(rightActive);
-
-  // Buzzer kêu nếu có xe ở bất kỳ bên nào (nhịp nhanh hơn khi 2 bên)
   bool danger = leftActive || rightActive;
-  if (danger) {
-    int period = (leftActive && rightActive) ? 120 : 250;
-    digitalWrite(PIN_BUZZER, ((millis() / period) % 2) ? HIGH : LOW);
-  } else {
-    digitalWrite(PIN_BUZZER, LOW);
-  }
+  setMotor(danger);
+
+  // Buzzer trái/phải theo hướng nguy hiểm, nháy nhanh hơn khi cả 2 bên.
+  int period = (leftActive && rightActive) ? 120 : 250;
+  bool pulse = ((millis() / period) % 2) != 0;
+  digitalWrite(PIN_BUZZER_LEFT, (leftActive && pulse) ? HIGH : LOW);
+  digitalWrite(PIN_BUZZER_RIGHT, (rightActive && pulse) ? HIGH : LOW);
 }
 
 // =========================================================================
@@ -179,9 +177,9 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
-  pinMode(PIN_BUZZER, OUTPUT);       digitalWrite(PIN_BUZZER, LOW);
-  pinMode(PIN_MOTOR_LEFT, OUTPUT);   setLeft(false);
-  pinMode(PIN_MOTOR_RIGHT, OUTPUT);  setRight(false);
+  pinMode(PIN_MOTOR, OUTPUT);         setMotor(false);
+  pinMode(PIN_BUZZER_LEFT, OUTPUT);   digitalWrite(PIN_BUZZER_LEFT, LOW);
+  pinMode(PIN_BUZZER_RIGHT, OUTPUT);  digitalWrite(PIN_BUZZER_RIGHT, LOW);
 
   // Cấp buffer RGB888 (PSRAM) cho 1 khung model
   snapshot_buf = (uint8_t*)ps_malloc(
