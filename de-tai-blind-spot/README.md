@@ -250,6 +250,9 @@ Firmware làm các việc:
 > ⚠️ Giống face recognition: **PSRAM là bắt buộc**, và nên đảm bảo ví dụ **CameraWebServer**
 > chạy ổn định trước (camera + nguồn tốt) rồi mới nạp firmware nhận diện này.
 
+📘 **Hướng dẫn train model FOMO nhận diện xe (từng bước):**
+[`docs/TRAIN_FOMO.md`](docs/TRAIN_FOMO.md)
+
 ---
 
 ## 6. Thư viện / công cụ gợi ý
