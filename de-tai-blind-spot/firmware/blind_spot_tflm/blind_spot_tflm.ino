@@ -117,12 +117,32 @@ bool camera_init() {
   config.xclk_freq_hz = 20000000;
   config.frame_size   = FRAMESIZE_QVGA;     // 320x240
   config.pixel_format = PIXFORMAT_GRAYSCALE; // lấy thẳng grayscale -> khỏi decode JPEG
-  config.fb_location  = CAMERA_FB_IN_PSRAM;
   config.grab_mode    = CAMERA_GRAB_LATEST;
-  config.fb_count     = 3;          // 3 buffer: chia cho 2 task (infer + web)
+
+  // --- Tự thích nghi theo PSRAM ---
+  // Lỗi "frame buffer malloc failed" thường do PSRAM chưa bật (Tools > PSRAM: OPI PSRAM)
+  // hoặc xin quá nhiều buffer. Có PSRAM: để buffer trong PSRAM + nhiều buffer cho 2 task.
+  // Không có PSRAM: hạ về 1 buffer trong RAM nội để vẫn chạy được (stream kém mượt hơn).
+  if (psramFound()) {
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.fb_count    = 2;          // 2 buffer đủ cho 2 task, nhẹ hơn 3
+    Serial.printf("PSRAM OK: %u byte tự do\n", (unsigned)ESP.getFreePsram());
+  } else {
+    config.fb_location = CAMERA_FB_IN_DRAM;
+    config.fb_count    = 1;          // RAM nội rất ít -> chỉ 1 buffer
+    Serial.println("CANH BAO: Khong tim thay PSRAM!");
+    Serial.println("  -> Vao Tools > PSRAM: 'OPI PSRAM' (board N16R8) roi nap lai.");
+  }
 
   esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) { Serial.printf("Camera lỗi 0x%x\n", err); return false; }
+  if (err != ESP_OK) {
+    Serial.printf("Camera loi 0x%x\n", err);
+    if (!psramFound()) {
+      Serial.println("Nguyen nhan rat co the: PSRAM chua duoc bat trong Arduino IDE.");
+      Serial.println("Tools > PSRAM = 'OPI PSRAM', Flash Size = 16MB, roi nap lai.");
+    }
+    return false;
+  }
   return true;
 }
 
