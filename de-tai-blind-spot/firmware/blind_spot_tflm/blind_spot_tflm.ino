@@ -50,6 +50,11 @@ uint8_t* gJpg    = nullptr;             // buffer JPEG mới nhất
 size_t   gJpgLen = 0;
 TaskHandle_t inferTaskHandle = nullptr;
 TaskHandle_t webTaskHandle   = nullptr;
+TaskHandle_t streamTaskHandle = nullptr;
+
+// MJPEG stream chạy trên 1 cổng RIÊNG (81) + task riêng -> giữ 1 kết nối liên tục,
+// không phải mở request mới mỗi khung => mượt hơn hẳn so với kiểu poll /jpg.
+WiFiServer streamServer(81);
 
 // ----------------------- CHÂN GPIO CẢNH BÁO --------------------------------
 // ESP32-S3-N16-R8:
@@ -161,11 +166,22 @@ void fillInputFromHalf(camera_fb_t* fb, int half) {
   int   zero  = input->params.zero_point;
 
   for (int y = 0; y < IMG_SIZE; y++) {
+    // vùng nguồn theo chiều dọc cho hàng y (lấy trung bình cả khối -> giảm nhiễu)
+    int sy0 = (y * srcH) / IMG_SIZE;
+    int sy1 = ((y + 1) * srcH) / IMG_SIZE; if (sy1 <= sy0) sy1 = sy0 + 1;
     for (int x = 0; x < IMG_SIZE; x++) {
-      // map (x,y) của 96x96 về toạ độ trong nửa khung (nearest neighbor)
-      int sx = x0 + (x * halfW) / IMG_SIZE;
-      int sy = (y * srcH) / IMG_SIZE;
-      uint8_t pix = fb->buf[sy * srcW + sx];     // 0..255 grayscale
+      // vùng nguồn theo chiều ngang cho cột x
+      int sx0 = x0 + (x * halfW) / IMG_SIZE;
+      int sx1 = x0 + ((x + 1) * halfW) / IMG_SIZE; if (sx1 <= sx0) sx1 = sx0 + 1;
+
+      // Lấy TRUNG BÌNH khối điểm ảnh (area-average) thay vì 1 điểm (nearest):
+      // ảnh xuống thang mịn hơn, ít răng cưa -> model nhận diện ổn định hơn.
+      uint32_t sum = 0, cnt = 0;
+      for (int yy = sy0; yy < sy1; yy++) {
+        const uint8_t* row = fb->buf + (size_t)yy * srcW;
+        for (int xx = sx0; xx < sx1; xx++) { sum += row[xx]; cnt++; }
+      }
+      uint8_t pix = (uint8_t)(sum / cnt);        // 0..255 grayscale
 
       float norm = pix / 255.0f;                 // khớp Rescaling(1/255) khi train
       int8_t q = (int8_t)round(norm / scale + zero);
@@ -234,10 +250,10 @@ void handleRoot() {
     "<span id='R' class='box off'>PHẢI: -</span></div>"
     "<div id='log'>An toàn — chưa phát hiện vật thể</div>"
     "<script>"
-    // Tự tải lại ảnh liên tục (không dùng MJPEG blocking) -> không treo inference
-    "function refreshImg(){let img=document.getElementById('cam');"
-    "img.onload=()=>setTimeout(refreshImg,10);img.onerror=()=>setTimeout(refreshImg,150);"
-    "img.src='/jpg?t='+Date.now();}refreshImg();"
+    // Dùng MJPEG: 1 kết nối giữ liên tục tới cổng 81 -> ảnh chạy liên tục, mượt.
+    "let cam=document.getElementById('cam');"
+    "function startStream(){cam.src='http://'+location.hostname+':81/stream';}"
+    "cam.onerror=()=>{cam.src='';setTimeout(startStream,800);};startStream();"
     "setInterval(async()=>{try{let r=await fetch('/status');let j=await r.json();"
     "let L=document.getElementById('L'),R=document.getElementById('R');"
     "L.textContent='TRÁI: '+(j.l*100).toFixed(0)+'%';R.textContent='PHẢI: '+(j.r*100).toFixed(0)+'%';"
@@ -252,7 +268,7 @@ void handleRoot() {
     "else if(j.ra){m='Phát hiện vật thể bên PHẢI ➡️';}"
     "else{m='An toàn — chưa phát hiện vật thể';}"
     "lg.textContent=m;lg.className=(j.la||j.ra)?'alert':'';"
-    "}catch(e){}},300);</script></body></html>";
+    "}catch(e){}},250);</script></body></html>";
   server.send(200, "text/html", html);
 }
 
@@ -320,17 +336,23 @@ void inferenceTask(void* pv) {
       fillInputFromHalf(fb, 0);  float pLeft  = classifyObjectProb();   // nửa TRÁI
       fillInputFromHalf(fb, 1);  float pRight = classifyObjectProb();   // nửa PHẢI
 
-      bool seenLeft  = pLeft  >= CONF_THRESHOLD;
-      bool seenRight = pRight >= CONF_THRESHOLD;
+      // LÀM MƯỢT xác suất theo thời gian (EMA) -> bớt nhiễu 1 khung, nhận diện ổn định.
+      static float emaL = 0.0f, emaR = 0.0f;
+      const float A = 0.5f;                 // hệ số làm mượt (0..1), cao = nhạy hơn
+      emaL = A * pLeft  + (1.0f - A) * emaL;
+      emaR = A * pRight + (1.0f - A) * emaR;
+
+      bool seenLeft  = emaL >= CONF_THRESHOLD;
+      bool seenRight = emaR >= CONF_THRESHOLD;
 
       Serial.printf("L=%.2f %s | R=%.2f %s\n",
-          pLeft,  seenLeft?"VAT":"-",
-          pRight, seenRight?"VAT":"-");
+          emaL,  seenLeft?"VAT":"-",
+          emaR, seenRight?"VAT":"-");
 
       updateAlert(seenLeft, seenRight);
 
       // Cập nhật trạng thái cho web (sau khi debounce)
-      gLeftProb = pLeft;  gRightProb = pRight;
+      gLeftProb = emaL;  gRightProb = emaR;
       gLeftActive = leftActive;  gRightActive = rightActive;
     }
 
@@ -346,6 +368,48 @@ void webTask(void* pv) {
   for (;;) {
     server.handleClient();
     vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
+// =========================================================================
+//        TASK FreeRTOS: MJPEG STREAM (cổng 81, chạy trên core 0)
+// =========================================================================
+// Giữ 1 kết nối multipart/x-mixed-replace và đẩy liên tục các khung JPEG đã
+// được task inference nén sẵn. Sao chép buffer trong vùng khoá rồi mới gửi
+// (ngoài khoá) -> không giữ mutex lâu, task inference không bị chặn.
+void streamTask(void* pv) {
+  streamServer.begin();
+  for (;;) {
+    WiFiClient client = streamServer.available();
+    if (!client) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+
+    client.print("HTTP/1.1 200 OK\r\n"
+                 "Access-Control-Allow-Origin: *\r\n"
+                 "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
+                 "Cache-Control: no-cache\r\n\r\n");
+
+    while (client.connected()) {
+      uint8_t* buf = nullptr; size_t len = 0;
+      if (xSemaphoreTake(jpgMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (gJpg && gJpgLen) {
+          len = gJpgLen;
+          buf = (uint8_t*) malloc(len);
+          if (buf) memcpy(buf, gJpg, len);
+          else len = 0;
+        }
+        xSemaphoreGive(jpgMutex);
+      }
+
+      if (buf && len) {
+        client.printf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
+                      (unsigned)len);
+        client.write(buf, len);
+        client.print("\r\n");
+        free(buf);
+      }
+      vTaskDelay(pdMS_TO_TICKS(33));   // ~30 khung/giây tối đa
+    }
+    client.stop();
   }
 }
 
@@ -403,11 +467,13 @@ void setup() {
 
   Serial.println("TFLM Blind Spot sẵn sàng.");
 
-  // ---- Tạo 2 task chạy song song trên 2 core ----
+  // ---- Tạo các task chạy song song trên 2 core ----
   // Inference: core 1 (APP_CPU), stack lớn vì dùng TFLM
   xTaskCreatePinnedToCore(inferenceTask, "infer", 8192, nullptr, 2, &inferTaskHandle, 1);
-  // Web server: core 0 (PRO_CPU), cùng core với WiFi stack
+  // Web server điều khiển (cổng 80): core 0 (PRO_CPU), cùng core với WiFi stack
   xTaskCreatePinnedToCore(webTask, "web", 8192, nullptr, 1, &webTaskHandle, 0);
+  // MJPEG stream (cổng 81): core 0, chạy song song để /status vẫn phản hồi
+  xTaskCreatePinnedToCore(streamTask, "stream", 4096, nullptr, 1, &streamTaskHandle, 0);
 }
 
 // =========================================================================
