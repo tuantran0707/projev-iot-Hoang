@@ -43,8 +43,11 @@ volatile float gLeftProb = 0.0f, gRightProb = 0.0f;
 volatile bool  gLeftActive = false, gRightActive = false;
 
 // ----------------------- FreeRTOS (đa nhiệm 2 core) -----------------------
-// Mutex bảo vệ camera: tránh task inference và task web cùng lấy frame một lúc.
-SemaphoreHandle_t camMutex = nullptr;
+// Chỉ task inference đụng camera. Nó nén sẵn 1 ảnh JPEG vào buffer chung,
+// task web chỉ gửi lại buffer đó -> không tranh camera, ảnh luôn mượt.
+SemaphoreHandle_t jpgMutex = nullptr;   // bảo vệ buffer JPEG chung
+uint8_t* gJpg    = nullptr;             // buffer JPEG mới nhất
+size_t   gJpgLen = 0;
 TaskHandle_t inferTaskHandle = nullptr;
 TaskHandle_t webTaskHandle   = nullptr;
 
@@ -202,7 +205,7 @@ void handleRoot() {
     "<script>"
     // Tự tải lại ảnh liên tục (không dùng MJPEG blocking) -> không treo inference
     "function refreshImg(){let img=document.getElementById('cam');"
-    "img.onload=()=>setTimeout(refreshImg,120);img.onerror=()=>setTimeout(refreshImg,500);"
+    "img.onload=()=>setTimeout(refreshImg,60);img.onerror=()=>setTimeout(refreshImg,300);"
     "img.src='/jpg?t='+Date.now();}refreshImg();"
     "setInterval(async()=>{try{let r=await fetch('/status');let j=await r.json();"
     "let L=document.getElementById('L'),R=document.getElementById('R');"
@@ -223,30 +226,20 @@ void handleStatus() {
   server.send(200, "application/json", buf);
 }
 
-// Trả MỘT khung JPEG rồi kết thúc ngay (KHÔNG blocking) -> loop() vẫn chạy inference
+// Trả ảnh JPEG đã được task inference nén sẵn (KHÔNG đụng camera ở đây)
 void handleJpg() {
-  // Lấy frame có khoá mutex để không tranh chấp với task inference
-  if (xSemaphoreTake(camMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+  if (xSemaphoreTake(jpgMutex, pdMS_TO_TICKS(300)) != pdTRUE) {
     server.send(503, "text/plain", "busy"); return;
   }
-  camera_fb_t* fb = esp_camera_fb_get();
-  uint8_t* jpg_buf = nullptr;
-  size_t   jpg_len = 0;
-  bool ok = false;
-  if (fb) {
-    ok = frame2jpg(fb, 80, &jpg_buf, &jpg_len);  // grayscale -> JPEG
-    esp_camera_fb_return(fb);
+  if (!gJpg || gJpgLen == 0) {
+    xSemaphoreGive(jpgMutex);
+    server.send(503, "text/plain", "no frame"); return;
   }
-  xSemaphoreGive(camMutex);
-
-  if (!fb) { server.send(503, "text/plain", "no frame"); return; }
-  if (!ok) { server.send(500, "text/plain", "jpg fail"); return; }
-
   server.sendHeader("Cache-Control", "no-store");
-  server.setContentLength(jpg_len);
+  server.setContentLength(gJpgLen);
   server.send(200, "image/jpeg", "");
-  server.client().write(jpg_buf, jpg_len);
-  free(jpg_buf);
+  server.client().write(gJpg, gJpgLen);   // gửi buffer đã nén sẵn
+  xSemaphoreGive(jpgMutex);
 }
 
 void startWebServer() {
@@ -262,21 +255,28 @@ void startWebServer() {
 // =========================================================================
 void inferenceTask(void* pv) {
   for (;;) {
-    camera_fb_t* fb = nullptr;
-    float pLeft = 0, pRight = 0;
-
-    // Lấy frame có khoá mutex
-    if (xSemaphoreTake(camMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-      fb = esp_camera_fb_get();
-      if (fb) {
-        fillInputFromHalf(fb, 0);  pLeft  = classifyObjectProb();   // nửa TRÁI
-        fillInputFromHalf(fb, 1);  pRight = classifyObjectProb();   // nửa PHẢI
-        esp_camera_fb_return(fb);
-      }
-      xSemaphoreGive(camMutex);
-    }
-
+    camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+
+    // 1) Chạy model cho 2 nửa khung
+    fillInputFromHalf(fb, 0);  float pLeft  = classifyObjectProb();   // nửa TRÁI
+    fillInputFromHalf(fb, 1);  float pRight = classifyObjectProb();   // nửa PHẢI
+
+    // 2) Nén sẵn 1 ảnh JPEG cho web (cùng frame này)
+    uint8_t* jb = nullptr; size_t jl = 0;
+    bool jok = frame2jpg(fb, 80, &jb, &jl);   // grayscale -> JPEG
+    esp_camera_fb_return(fb);
+
+    if (jok) {
+      // đổi buffer JPEG chung (giải phóng cái cũ)
+      if (xSemaphoreTake(jpgMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (gJpg) free(gJpg);
+        gJpg = jb; gJpgLen = jl;
+        xSemaphoreGive(jpgMutex);
+      } else {
+        free(jb);   // không lấy được khoá -> bỏ khung này
+      }
+    }
 
     bool seenLeft  = pLeft  >= CONF_THRESHOLD;
     bool seenRight = pRight >= CONF_THRESHOLD;
@@ -338,8 +338,8 @@ void setup() {
   input  = interpreter->input(0);
   output = interpreter->output(0);
 
-  // Tạo mutex bảo vệ camera trước khi bật các task
-  camMutex = xSemaphoreCreateMutex();
+  // Tạo mutex bảo vệ buffer JPEG chung trước khi bật các task
+  jpgMutex = xSemaphoreCreateMutex();
 
   // PHÁT WiFi riêng (Access Point) để laptop/điện thoại bắt vào xem stream
   WiFi.mode(WIFI_AP);
