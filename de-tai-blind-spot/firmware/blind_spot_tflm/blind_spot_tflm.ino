@@ -66,6 +66,7 @@ TaskHandle_t webTaskHandle   = nullptr;
 #define DEBOUNCE_FRAMES  3
 #define CLEAR_FRAMES     3
 #define OBJECT_CLASS     1       // 0=none, 1=object (khớp CLASS_NAMES trong .py)
+#define INFER_EVERY_N    3       // chạy model mỗi N khung (stream mượt hơn). Tăng để mượt hơn.
 
 // ----------------------- CHÂN CAMERA (ESP32-S3-CAM N16R8) ------------------
 #define PWDN_GPIO_NUM -1
@@ -205,7 +206,7 @@ void handleRoot() {
     "<script>"
     // Tự tải lại ảnh liên tục (không dùng MJPEG blocking) -> không treo inference
     "function refreshImg(){let img=document.getElementById('cam');"
-    "img.onload=()=>setTimeout(refreshImg,60);img.onerror=()=>setTimeout(refreshImg,300);"
+    "img.onload=()=>setTimeout(refreshImg,25);img.onerror=()=>setTimeout(refreshImg,200);"
     "img.src='/jpg?t='+Date.now();}refreshImg();"
     "setInterval(async()=>{try{let r=await fetch('/status');let j=await r.json();"
     "let L=document.getElementById('L'),R=document.getElementById('R');"
@@ -254,19 +255,14 @@ void startWebServer() {
 //                 TASK FreeRTOS: INFERENCE (chạy trên core 1)
 // =========================================================================
 void inferenceTask(void* pv) {
+  uint8_t frameCnt = 0;
   for (;;) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
 
-    // 1) Chạy model cho 2 nửa khung
-    fillInputFromHalf(fb, 0);  float pLeft  = classifyObjectProb();   // nửa TRÁI
-    fillInputFromHalf(fb, 1);  float pRight = classifyObjectProb();   // nửa PHẢI
-
-    // 2) Nén sẵn 1 ảnh JPEG cho web (cùng frame này)
+    // 1) Nén JPEG cho web MỖI khung -> stream mượt (việc này nhẹ)
     uint8_t* jb = nullptr; size_t jl = 0;
     bool jok = frame2jpg(fb, 80, &jb, &jl);   // grayscale -> JPEG
-    esp_camera_fb_return(fb);
-
     if (jok) {
       // đổi buffer JPEG chung (giải phóng cái cũ)
       if (xSemaphoreTake(jpgMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -278,20 +274,28 @@ void inferenceTask(void* pv) {
       }
     }
 
-    bool seenLeft  = pLeft  >= CONF_THRESHOLD;
-    bool seenRight = pRight >= CONF_THRESHOLD;
+    // 2) Chạy model MỖI 3 KHUNG (nặng) -> stream không bị ghì lại
+    if (++frameCnt >= INFER_EVERY_N) {
+      frameCnt = 0;
+      fillInputFromHalf(fb, 0);  float pLeft  = classifyObjectProb();   // nửa TRÁI
+      fillInputFromHalf(fb, 1);  float pRight = classifyObjectProb();   // nửa PHẢI
 
-    Serial.printf("L=%.2f %s | R=%.2f %s\n",
-        pLeft,  seenLeft?"VAT":"-",
-        pRight, seenRight?"VAT":"-");
+      bool seenLeft  = pLeft  >= CONF_THRESHOLD;
+      bool seenRight = pRight >= CONF_THRESHOLD;
 
-    updateAlert(seenLeft, seenRight);
+      Serial.printf("L=%.2f %s | R=%.2f %s\n",
+          pLeft,  seenLeft?"VAT":"-",
+          pRight, seenRight?"VAT":"-");
 
-    // Cập nhật trạng thái cho web (sau khi debounce)
-    gLeftProb = pLeft;  gRightProb = pRight;
-    gLeftActive = leftActive;  gRightActive = rightActive;
+      updateAlert(seenLeft, seenRight);
 
-    vTaskDelay(pdMS_TO_TICKS(10));   // nhường CPU
+      // Cập nhật trạng thái cho web (sau khi debounce)
+      gLeftProb = pLeft;  gRightProb = pRight;
+      gLeftActive = leftActive;  gRightActive = rightActive;
+    }
+
+    esp_camera_fb_return(fb);
+    vTaskDelay(pdMS_TO_TICKS(2));   // nhường CPU (ít thôi để ra nhiều khung)
   }
 }
 
@@ -301,7 +305,7 @@ void inferenceTask(void* pv) {
 void webTask(void* pv) {
   for (;;) {
     server.handleClient();
-    vTaskDelay(pdMS_TO_TICKS(2));
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
 
