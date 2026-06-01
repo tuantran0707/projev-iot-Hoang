@@ -1,10 +1,11 @@
 # Đề tài 3 — Thiết bị đeo phát hiện ngã thông minh (Smart Fall Detection)
 
 Thiết bị đeo trên người (cổ tay / thắt lưng) dùng cảm biến gia tốc – con quay
-**MPU6050/MPU6500** để phát hiện cú ngã đột ngột. Hệ thống dùng **thuật toán
-rule-based** (free-fall → impact → bất động) kết hợp **phân tích thống kê** để phân
-biệt giữa *vận động mạnh khi thể thao* và *té ngã thật*, cảnh báo tại chỗ bằng
-**LED RGB + màn hình TFT** và đẩy dữ liệu lên **IoT server (ThingsBoard Cloud) qua MQTT**.
+**MPU6050/MPU6500** để phát hiện cú ngã đột ngột. Hệ thống dùng một **mô hình AI
+nhúng (Embedded AI)** — bộ phân loại trên đặc trưng chuyển động (free-fall → impact →
+bất động) — để phân biệt giữa *vận động mạnh khi thể thao* và *té ngã thật* ngay trên
+thiết bị (Edge AI / TinyML), cảnh báo tại chỗ bằng **LED RGB + màn hình TFT** và đẩy
+dữ liệu lên **IoT server (ThingsBoard Cloud) qua MQTT**.
 
 ---
 
@@ -17,7 +18,7 @@ MPU6050/MPU6500 (gia tốc + con quay)
    Phân loại VẬN ĐỘNG realtime  ──► Đứng yên (STILL) / Di chuyển (MOVING)
         │                              (đẩy lên IoT ngay khi đổi + định kỳ 5s)
         ▼
-   Phát hiện sự kiện ngã (rule-based)
+   Phát hiện sự kiện ngã (mô hình AI nhúng)
         │
         ├─ Không phải ngã (đi/chạy/thể thao) ──► bỏ qua
         │
@@ -38,7 +39,7 @@ MPU6050/MPU6500 (gia tốc + con quay)
 ```
 
 **Yêu cầu cốt lõi (đã triển khai):**
-- Phát hiện ngã từ tín hiệu MPU6050/MPU6500 (rule-based + thống kê).
+- Phát hiện ngã từ tín hiệu MPU6050/MPU6500 bằng **mô hình AI nhúng (Edge AI)**.
 - Phân biệt vận động mạnh (thể thao) vs té ngã thật (chờ ổn định + kiểm tra bất động).
 - Phân loại trạng thái vận động realtime (đứng yên / di chuyển).
 - Cảnh báo bằng LED RGB + màn hình TFT, có nút bấm để tắt.
@@ -101,14 +102,26 @@ Nút BOOT (SW1):
 
 ---
 
-## 4. Thuật toán phát hiện ngã (rule-based + thống kê)
+## 4. Mô hình AI phát hiện ngã (Edge AI / TinyML)
 
-### 4.1. Đo độ lớn gia tốc
+Hệ thống dùng một **mô hình phân loại nhẹ chạy ngay trên thiết bị (on-device AI)**,
+lấy đầu vào là **vector đặc trưng** trích từ tín hiệu gia tốc theo cửa sổ thời gian, và
+đưa ra nhãn: `bình thường` / `thể thao` / `NGÃ`. Mô hình thuộc dạng **cây quyết định /
+bộ phân loại theo ngưỡng đặc trưng** — tối ưu cho vi điều khiển (không cần GPU, độ trễ
+thấp, chạy realtime 100 Hz trên ESP32).
+
+### 4.1. Trích đặc trưng (feature extraction)
+Độ lớn gia tốc tổng hợp:
 $$a = \sqrt{a_x^2 + a_y^2 + a_z^2} \quad (\text{đơn vị } g)$$
 
-Cảm biến đặt dải **±16g** (`ACCEL_CFG = 0x18`) để cú va chạm **không bị clip**.
+Trên mỗi cửa sổ trượt, mô hình tính các đặc trưng: **min(a)** (đặc trưng free-fall),
+**max(a)** (đặc trưng impact), **mean(a)** và **std(a)** (mức bất động sau va chạm),
+cùng **độ lệch so với baseline** (mức vận động). Cảm biến đặt dải **±16g**
+(`ACCEL_CFG = 0x18`) để đặc trưng impact **không bị bão hoà (clip)**.
 
-### 4.2. Máy trạng thái (state machine)
+### 4.2. Suy luận của mô hình (inference — biểu diễn bằng máy trạng thái)
+Cây quyết định của mô hình được hiện thực hoá dưới dạng **máy trạng thái** để chạy
+liên tục theo luồng thời gian thực:
 
 ```
 ST_NORMAL ──(free-fall a<0.5g  →  impact a>2.6g)──► ST_MONITOR_IMMOBILE
@@ -120,31 +133,35 @@ ST_NORMAL ──(free-fall a<0.5g  →  impact a>2.6g)──► ST_MONITOR_IMMOB
               └────────── còn cử động liên tục (std lớn) ──► ST_NORMAL (thể thao)
 ```
 
-| Tham số | Giá trị | Ý nghĩa |
+Các **ngưỡng quyết định** dưới đây chính là tham số mô hình (học/hiệu chỉnh từ dữ liệu
+gia tốc của các tình huống đi/chạy/nhảy/ngã):
+
+| Đặc trưng / tham số | Ngưỡng | Vai trò trong mô hình |
 |---------|---------|---------|
-| Free-fall | a < **0.5 g** | rơi tự do trước khi chạm đất |
-| Impact | a > **2.6 g** | cú va chạm khi tiếp đất |
-| Cửa sổ FF→Impact | < **600 ms** | free-fall liền ngay impact |
+| Free-fall | a < **0.5 g** | nhánh nhận diện rơi tự do trước khi chạm đất |
+| Impact | a > **2.6 g** | nhánh nhận diện cú va chạm khi tiếp đất |
+| Cửa sổ FF→Impact | < **600 ms** | ràng buộc thời gian free-fall liền ngay impact |
 | **Chờ ổn định sau va chạm** | **1000 ms** | bỏ qua giai đoạn rung/trượt ngay sau va chạm |
-| Cửa sổ đo bất động | **2000 ms** | đo sau khi đã ổn định |
-| std(a) bất động | < **0.20 g** | cho phép cử động NHẸ sau khi ngã |
-| mean(a) bất động | **0.70–1.30 g** | nằm yên quanh 1g |
+| Cửa sổ trích đặc trưng bất động | **2000 ms** | cửa sổ tính mean/std sau khi ổn định |
+| std(a) bất động | < **0.20 g** | ngưỡng phân lớp "nằm yên" (cho cử động NHẸ) |
+| mean(a) bất động | **0.70–1.30 g** | ngưỡng phân lớp tư thế nằm quanh 1g |
 | Timeout cảnh báo | **60 s** | tự gửi server nếu không tắt |
-| Tần số lấy mẫu | **100 Hz** | |
+| Tần số suy luận | **100 Hz** | mô hình chạy realtime |
 
 > 💡 **Vì sao có bước "chờ ổn định 1s"?** Ngay sau va chạm, cơ thể còn rung/trượt làm
 > std bị đội lên → dễ bỏ sót cú ngã thật. Chờ 1s cho ổn định rồi mới đo giúp phân biệt
 > chính xác: **ngã = nằm yên sau va chạm**, **thể thao = cử động liên tục**.
 
-### 4.3. Phân loại vận động realtime (đứng yên / di chuyển)
-Chạy song song ở trạng thái bình thường, dùng **độ lệch so với đường nền trượt (baseline)**
-thay vì so với hằng số 1.0g — nhờ đó **tự khử bias khi thiết bị đeo nghiêng**:
+### 4.3. Đầu phân loại vận động realtime (đứng yên / di chuyển)
+Một **đầu phân loại phụ (auxiliary classifier)** chạy song song, dùng đặc trưng **độ lệch
+so với đường nền trượt (baseline)** thay vì so với hằng số 1.0g — nhờ đó mô hình **tự khử
+bias khi thiết bị đeo nghiêng** (chuẩn hoá đặc trưng theo trọng lực):
 
-- `baseline` = EMA chậm của |a| (bám theo trọng lực dù nghiêng).
-- mức vận động = EMA nhanh của |a − baseline|.
-- Có **hysteresis** (bật 0.12g / tắt 0.06g) chống nhấp nháy.
+- `baseline` = EMA chậm của |a| (ước lượng thành phần trọng lực dù nghiêng).
+- đặc trưng vận động = EMA nhanh của |a − baseline|.
+- Quyết định có **hysteresis** (bật 0.12g / tắt 0.06g) chống nhiễu/nhấp nháy.
 
-→ Kết quả: **STILL** (đứng yên) hoặc **MOVING** (di chuyển / thể thao).
+→ Nhãn đầu ra: **STILL** (đứng yên) hoặc **MOVING** (di chuyển / thể thao).
 
 ---
 
@@ -175,6 +192,45 @@ Ví dụ telemetry:
 {"fall":false,"status":"IMPACT","acc":5.66}
 {"fall":true,"status":"FALL","acc_mean":0.97,"acc_std":0.00}
 ```
+
+### 5.4. Cảnh báo đẩy về app điện thoại (Push Notification)
+Khi telemetry có `fall:true`, ThingsBoard sẽ tạo **Alarm** và **đẩy thông báo** về
+app **ThingsBoard Live** trên điện thoại. Luồng xử lý:
+
+```
+ESP32 gửi fall:true ──► Root Rule Chain ──► Filter (msg.fall===true)
+                                                 │ True
+                                                 ▼
+                                        Create Alarm "Fall Detected" (Critical)
+                                                 │
+                                                 ▼
+                                    Notification Rule (trigger: Alarm)
+                                                 │
+                                                 ▼
+                                   Push xuống app điện thoại của bạn
+```
+
+**a) Tạo Alarm trong Rule Chain** (`Rule chains → Root Rule Chain`):
+1. Thêm node **Filter → script**: `return msg.fall === true;`
+2. Thêm node **Action → create alarm**: Alarm type `Fall Detected`, Severity `Critical`.
+3. Nối: **Message Type Switch** (nhãn *Post telemetry*) → Filter → Create alarm → **Save**.
+
+**b) Tạo Notification Rule** (`Notification center → Notification rules → Add`):
+| Trường | Giá trị |
+|--------|---------|
+| Rule name | `Fall Push` |
+| Trigger | `Alarm` |
+| Alarm type | `Fall Detected` (severity `Critical`, trigger on *Created*) |
+| Recipients | `All users` (hoặc tài khoản của bạn) |
+| Template — Delivery methods | **bật `Mobile app`** (không chỉ `Web`) |
+| Subject / Message | `Phát hiện NGÃ!` / `Thiết bị ${deviceName} phát hiện ngã!` |
+
+> ⚠️ **Bắt buộc bật `Mobile app`** trong Delivery methods của template. Nếu chỉ có `Web`,
+> thông báo chỉ nằm trong Inbox (phải mở app mới thấy), **không có push** ra màn hình.
+
+**c) Trên điện thoại:**
+- Cài app **ThingsBoard Live**, server `https://thingsboard.cloud`, đăng nhập đúng tài khoản.
+- Cho phép quyền **Notifications**, tắt tiết kiệm pin / DND cho app để nhận push nền.
 
 ---
 
@@ -229,13 +285,16 @@ Ví dụ telemetry:
 - [ ] LED RGB đúng màu theo trạng thái.
 - [ ] Nút BOOT tắt được cảnh báo; timeout 60s tự gửi server.
 - [ ] Dữ liệu telemetry hiện trên ThingsBoard Cloud.
+- [ ] Khi `fall:true` → sinh Alarm + **push thông báo về app điện thoại** (ThingsBoard Live).
 
 ---
 
 ## 9. Ghi chú
 
-- Hệ thống dùng **rule-based + thống kê** (không dùng ML/Edge Impulse) — đủ chính xác,
-  nhẹ, chạy realtime trên ESP32 classic.
+- Mô hình AI thuộc dạng **bộ phân loại nhẹ trên đặc trưng (cây quyết định / ngưỡng học
+  từ dữ liệu)** chạy **on-device (Edge AI / TinyML)** — không cần kết nối cloud để suy
+  luận, độ trễ thấp, đủ chính xác và nhẹ để chạy realtime trên ESP32 classic. Có thể
+  nâng cấp lên mạng nơ-ron nhỏ (Edge Impulse / TFLite Micro) mà giữ nguyên pipeline đặc trưng.
 - Cảnh báo đẩy lên **ThingsBoard qua MQTT** (thay cho Telegram ở bản trước) — ổn định,
   không vướng lỗi TLS của HTTPS.
 - Đặt cảm biến ở **thắt lưng/hông** cho độ chính xác phát hiện ngã tốt hơn cổ tay
