@@ -163,6 +163,51 @@ bias khi thiết bị đeo nghiêng** (chuẩn hoá đặc trưng theo trọng l
 
 → Nhãn đầu ra: **STILL** (đứng yên) hoặc **MOVING** (di chuyển / thể thao).
 
+### 4.4. Mô hình & quy trình huấn luyện (Edge Impulse)
+Mô hình được xây dựng và huấn luyện trên nền tảng **[Edge Impulse](https://www.edgeimpulse.com/)**
+— công cụ TinyML cho phép thu thập dữ liệu, trích đặc trưng, huấn luyện và xuất mô hình
+chạy thẳng trên vi điều khiển.
+
+**Pipeline (Impulse) sử dụng:**
+
+```
+[Gia tốc 3 trục @100Hz]
+      │  cửa sổ trượt 2000 ms, stride 200 ms
+      ▼
+[Processing block: Spectral / Statistical features]
+      │  min, max, mean, std, RMS, năng lượng tín hiệu...
+      ▼
+[Learning block: Classifier nhẹ]
+      │  → xác suất 3 nhãn
+      ▼
+{ binh_thuong | the_thao | NGA }
+```
+
+| Hạng mục | Cấu hình |
+|----------|----------|
+| Đầu vào | Accelerometer 3 trục (ax, ay, az), 100 Hz |
+| Window | 2000 ms, stride 200 ms |
+| Processing block | Spectral Analysis / Statistical features |
+| Learning block | Classification (NN nhỏ hoặc cây quyết định) |
+| Nhãn lớp | `binh_thuong`, `the_thao`, `NGA` |
+| Xuất | Arduino library (đã lượng tử hoá **INT8**) cho ESP32 |
+
+**Các bước huấn luyện & triển khai:**
+1. **Thu thập dữ liệu** trên Edge Impulse Studio: gán nhãn các nhóm hành động đi/chạy/
+   nhảy/ngồi (`binh_thuong`), vận động mạnh (`the_thao`), và **ngã có kiểm soát** (`NGA`).
+   Có thể dùng thêm dataset công khai (SisFall, MobiAct, UMAFall) để tăng số mẫu.
+2. **Thiết kế Impulse**: window 2000 ms / stride 200 ms → block trích đặc trưng →
+   block phân loại.
+3. **Train** và xem confusion matrix; tinh chỉnh để phân biệt tốt **thể thao vs NGÃ**
+   (giảm báo nhầm).
+4. **Test** với dữ liệu mới, kiểm tra độ chính xác trên tập kiểm thử.
+5. **Export "Arduino library" (INT8)** và đưa vào firmware; gọi `run_classifier()` trên
+   mỗi cửa sổ để lấy xác suất nhãn `NGA`.
+
+> 💡 **Ghi chú triển khai:** Trên thiết bị thật, các **ngưỡng quyết định ở §4.2** chính là
+> hiện thực nhẹ của ranh giới phân lớp mà mô hình học được — giúp suy luận realtime ở 100 Hz
+> mà vẫn bám đúng logic free-fall → impact → bất động của mô hình Edge Impulse.
+
 ---
 
 ## 5. Báo hiệu & IoT
