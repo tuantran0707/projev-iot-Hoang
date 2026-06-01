@@ -66,7 +66,8 @@ TaskHandle_t webTaskHandle   = nullptr;
 #define DEBOUNCE_FRAMES  3
 #define CLEAR_FRAMES     3
 #define OBJECT_CLASS     1       // 0=none, 1=object (khớp CLASS_NAMES trong .py)
-#define INFER_EVERY_N    3       // chạy model mỗi N khung (stream mượt hơn). Tăng để mượt hơn.
+#define INFER_EVERY_N    4       // chạy model mỗi N khung (stream mượt hơn). Tăng để mượt hơn.
+#define JPEG_QUALITY     60      // chất lượng JPEG (thấp hơn = ảnh nhẹ = truyền nhanh = mượt)
 
 // ----------------------- CHÂN CAMERA (ESP32-S3-CAM N16R8) ------------------
 #define PWDN_GPIO_NUM -1
@@ -196,23 +197,42 @@ void handleRoot() {
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>Blind Spot Stream</title>"
     "<style>body{font-family:sans-serif;text-align:center;background:#111;color:#eee}"
-    "img{width:90%;max-width:480px;border:2px solid #444;border-radius:8px}"
+    ".wrap{position:relative;display:inline-block;width:90%;max-width:480px}"
+    "img{width:100%;display:block;border:2px solid #444;border-radius:8px}"
+    // 2 ô khoanh vùng phủ lên nửa trái/phải, mặc định ẩn (trong suốt)
+    ".zone{position:absolute;top:2px;bottom:2px;width:48%;border:3px solid transparent;"
+    "border-radius:6px;box-sizing:border-box;pointer-events:none}"
+    "#zL{left:2px}#zR{right:2px}.zone.hit{border-color:#ff2d2d;box-shadow:0 0 12px #ff2d2d}"
     ".box{display:inline-block;padding:8px 16px;margin:6px;border-radius:8px;font-weight:bold}"
-    ".on{background:#c0392b;color:#fff}.off{background:#27ae60;color:#fff}</style></head>"
+    ".on{background:#c0392b;color:#fff}.off{background:#27ae60;color:#fff}"
+    "#log{margin:10px auto;padding:10px;max-width:480px;border-radius:8px;font-weight:bold;"
+    "background:#222;color:#27ae60}#log.alert{background:#c0392b;color:#fff}</style></head>"
     "<body><h2>ESP32-S3 Blind Spot</h2>"
-    "<img id='cam' src='/jpg'>"
+    "<div class='wrap'><img id='cam' src='/jpg'>"
+    "<div id='zL' class='zone'></div><div id='zR' class='zone'></div></div>"
     "<div><span id='L' class='box off'>TRÁI: -</span>"
     "<span id='R' class='box off'>PHẢI: -</span></div>"
+    "<div id='log'>An toàn — chưa phát hiện vật thể</div>"
     "<script>"
     // Tự tải lại ảnh liên tục (không dùng MJPEG blocking) -> không treo inference
     "function refreshImg(){let img=document.getElementById('cam');"
-    "img.onload=()=>setTimeout(refreshImg,25);img.onerror=()=>setTimeout(refreshImg,200);"
+    "img.onload=()=>setTimeout(refreshImg,10);img.onerror=()=>setTimeout(refreshImg,150);"
     "img.src='/jpg?t='+Date.now();}refreshImg();"
     "setInterval(async()=>{try{let r=await fetch('/status');let j=await r.json();"
     "let L=document.getElementById('L'),R=document.getElementById('R');"
     "L.textContent='TRÁI: '+(j.l*100).toFixed(0)+'%';R.textContent='PHẢI: '+(j.r*100).toFixed(0)+'%';"
     "L.className='box '+(j.la?'on':'off');R.className='box '+(j.ra?'on':'off');"
-    "}catch(e){}},400);</script></body></html>";
+    // khoanh vùng đỏ theo nửa phát hiện
+    "document.getElementById('zL').className='zone'+(j.la?' hit':'');"
+    "document.getElementById('zR').className='zone'+(j.ra?' hit':'');"
+    // dòng log cảnh báo
+    "let lg=document.getElementById('log');let m;"
+    "if(j.la&&j.ra){m='⚠️ PHÁT HIỆN VẬT THỂ CẢ HAI BÊN!';}"
+    "else if(j.la){m='⬅️ Phát hiện vật thể bên TRÁI';}"
+    "else if(j.ra){m='Phát hiện vật thể bên PHẢI ➡️';}"
+    "else{m='An toàn — chưa phát hiện vật thể';}"
+    "lg.textContent=m;lg.className=(j.la||j.ra)?'alert':'';"
+    "}catch(e){}},300);</script></body></html>";
   server.send(200, "text/html", html);
 }
 
@@ -262,7 +282,7 @@ void inferenceTask(void* pv) {
 
     // 1) Nén JPEG cho web MỖI khung -> stream mượt (việc này nhẹ)
     uint8_t* jb = nullptr; size_t jl = 0;
-    bool jok = frame2jpg(fb, 80, &jb, &jl);   // grayscale -> JPEG
+    bool jok = frame2jpg(fb, JPEG_QUALITY, &jb, &jl);   // grayscale -> JPEG
     if (jok) {
       // đổi buffer JPEG chung (giải phóng cái cũ)
       if (xSemaphoreTake(jpgMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
