@@ -208,6 +208,27 @@ chạy thẳng trên vi điều khiển.
 > hiện thực nhẹ của ranh giới phân lớp mà mô hình học được — giúp suy luận realtime ở 100 Hz
 > mà vẫn bám đúng logic free-fall → impact → bất động của mô hình Edge Impulse.
 
+### 4.5. Code Arduino chạy với mô hình Edge Impulse
+Firmware tích hợp thư viện inference của mô hình (`*_inferencing.h`) + đọc MPU6050 + đẩy MQTT:
+
+➡️ [`firmware/fall_detection_ei/fall_detection_ei.ino`](firmware/fall_detection_ei/fall_detection_ei.ino)
+➡️ [`firmware/fall_detection_ei/FallDetection_inferencing.h`](firmware/fall_detection_ei/FallDetection_inferencing.h)
+
+Firmware gom đủ 1 cửa sổ mẫu (200 mẫu × 3 trục), gọi `run_classifier()` của mô hình để lấy
+xác suất 3 nhãn `binh_thuong` / `the_thao` / `NGA`; nếu `NGA ≥ 0.70` → vào cảnh báo (LED nháy
+đỏ + đếm 60s, nút BOOT để huỷ) và đẩy telemetry
+`{"fall":true,"status":"FALL_SUSPECT","confidence":...,"model":"edge-impulse"}` lên ThingsBoard.
+
+**Nạp firmware:**
+1. Mở `fall_detection_ei.ino` trong Arduino IDE (cùng thư mục đã có `FallDetection_inferencing.h`).
+2. Điền `WIFI_SSID`, `WIFI_PASS`, `TB_TOKEN` → chọn board **ESP32 Dev Module** → nạp.
+3. Mở Serial Monitor **115200** để xem nhãn & xác suất mỗi cửa sổ inference.
+
+> 🔄 **Nâng cấp lên mô hình NN của Edge Impulse Studio:** Train trên
+> [Edge Impulse](https://www.edgeimpulse.com/) → *Export → Arduino library* (`.zip`) →
+> *Sketch → Include Library → Add .ZIP Library*, rồi đổi `#include` sang thư viện
+> `<ProjectName>_inferencing.h`. Firmware **không cần sửa** vì cùng API `run_classifier()`.
+
 ---
 
 ## 5. Báo hiệu & IoT
