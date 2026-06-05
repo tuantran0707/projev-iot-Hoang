@@ -59,6 +59,7 @@ const char* TB_TOKEN  = "8kG78bmcD7x0h1hBPk1r";
 #define ATTR_REQUEST_INTERVAL_MS 15000UL
 #define TIME_SYNC_INTERVAL_MS  3600000UL
 #define GAS_SCAN_SAMPLE_MS        200UL
+#define GAS_ALERT_THRESHOLD        700
 
 // -------------------------------------------------------------------
 // Calibration defaults
@@ -137,6 +138,7 @@ unsigned long gScanStartedAt = 0;
 unsigned long gLastGasSampleAt = 0;
 int gPeakGasRaw = -1;
 int gPeakGasAngleDeg = 0;
+bool gGasAboveThreshold = false;
 
 unsigned long gLastTelemetry = 0;
 unsigned long gLastAttrReq = 0;
@@ -662,26 +664,25 @@ void publishTelemetry(bool force) {
   gLastTelemetry = nowMs;
 
   int gasRaw = analogRead(PIN_GAS);
-  StaticJsonDocument<320> doc;
+  bool gasAbove = (gasRaw > GAS_ALERT_THRESHOLD);
+
+  // Chi phat event khi vua vuot nguong (tranh spam)
+  if (gasAbove && !gGasAboveThreshold) {
+    publishEvent("gas_over_threshold", gasRaw, -1);
+  }
+  gGasAboveThreshold = gasAbove;
+
+  StaticJsonDocument<128> doc;
   doc["gas_raw"] = gasRaw;
-  doc["gas_voltage"] = roundf(gasRaw * 3.3f / 4095.0f * 100.0f) / 100.0f;
-  doc["motor_x"] = gCurrentX;
-  doc["motor_y"] = gCurrentY;
-  doc["mode"] = modeToText(gMode);
-  doc["auto_state"] = autoStateToText(gAutoState);
-  doc["auto_enabled"] = gAutoCfg.enabled;
-  doc["target_x"] = gAutoCfg.targetX;
-  doc["target_y"] = gAutoCfg.targetY;
-  doc["est_x"] = gPose.x;
-  doc["est_y"] = gPose.y;
-  doc["heading"] = (int)gPose.heading;
-  doc["run_at_epoch"] = gAutoCfg.runAtEpoch;
-  doc["epoch"] = nowEpoch();
-  doc["rssi"] = WiFi.RSSI();
-  char buf[320];
+  doc["est_x"]   = gPose.x;
+  doc["est_y"]   = gPose.y;
+  if (gasAbove) {
+    doc["detect"] = true;
+  }
+  char buf[128];
   serializeJson(doc, buf);
   mqttClient.publish("v1/devices/me/telemetry", buf);
-  Serial.printf("[TEL] gas=%d mode=%s state=%s\n", gasRaw, modeToText(gMode), autoStateToText(gAutoState));
+  Serial.printf("[TEL] gas=%d x=%d y=%d detect=%d\n", gasRaw, gPose.x, gPose.y, gasAbove ? 1 : 0);
 }
 
 // -------------------------------------------------------------------
