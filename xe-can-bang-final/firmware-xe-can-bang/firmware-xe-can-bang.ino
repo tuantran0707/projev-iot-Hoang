@@ -69,20 +69,28 @@
 //      0 = dùng AngleX   |   1 = dùng AngleY
 #define BALANCE_AXIS_Y 1
 
-// 2) Góc cân bằng (điểm thăng bằng) - đo khi xe ĐỨNG THẲNG đứng yên (độ).
-//    Từ log: khi giữ xe đứng cân thật, Angle ≈ 1.0 -> đặt điểm cân bằng = 1.0
-//    Tinh chỉnh thêm qua Serial bằng lệnh: s1.0 / s0.5 / s1.5 ...
-float ANGLE_SETPOINT = 1.0;
+// 2) Điểm cân bằng (đo khi giữ xe đứng cân). Serial: s1.0 / s-0.5 ...
+//    Bật/tắt cân bằng dùng ANGLE_SETPOINT (KHÔNG cộng bias).
+// ANGLE_SETPOINT: ngưỡng Bal ON. FORWARD_TRIM: chỉnh tư thế đứng (tăng = bớt ngả sau).
+float ANGLE_SETPOINT = 1.2;
+#define FORWARD_TRIM 3.3f
+#define REAR_ERROR_GAIN 1.4f
+#define ANTI_DRIFT_KD 0.08f
+#define ANTI_DRIFT_KP 0.005f
+#define ENC_VEL_LPF 0.10f
+#define ENC_POS_LPF 0.05f
+// Lọc nhẹ hơn bản trước 1 chút để bớt giật (0.22/0.18 -> 0.24/0.16).
+#define ANGLE_LPF 0.24f
+#define OUTPUT_FILTER 0.16f
 
-// 3) Ngưỡng góc ngã: |góc| vượt ngưỡng này -> tắt động cơ (xe đã đổ).
-#define FALL_LIMIT 45.0
+// 3) Ngưỡng góc ngã / bật cân bằng (so với ANGLE_SETPOINT, không dùng bias).
+#define FALL_LIMIT 30.0
+#define BALANCE_ENTER_DEG 5.0
 
-// 4) PID GÓC (vòng trong) - đây là 3 hệ số QUAN TRỌNG NHẤT cần dò:
-//    Cách dò: Ki=0, Kd=0. Tăng Kp tới khi xe rung quanh thẳng đứng.
-//             Tăng Kd để dập rung. Cuối cùng thêm Ki nhỏ để hết trôi góc.
-float Kp = 15.0;
-float Ki = 0.0;
-float Kd = 2.5;
+// 4) PID GÓC (vòng trong)
+float Kp = 6.5;
+float Ki = 0.15;
+float Kd = 7.5;
 
 // 5) PID TỐC ĐỘ/VỊ TRÍ (vòng ngoài, từ encoder) - CHỐNG XE TRÔI/CHÚI 1 HƯỚNG.
 //    >>> TẠM TẮT (=0): vì encoder PHẢI và TRÁI đang đếm NGƯỢC DẤU nhau khi xe đi cùng
@@ -92,22 +100,26 @@ float Kp_pos = 0.0;
 float Kd_pos = 0.0;
 #define POS_SIGN 1     // đảo chiều vòng ngoài nếu xe trôi nhanh hơn
 
-// 6) Giới hạn PWM (TB6612 dùng 8-bit: 0..255).
-#define PWM_MAX 255
-// PWM tối thiểu để thắng ma sát/khởi động (deadband). Tăng nếu motor ì.
+// 6) Giới hạn PWM — hạ để giảm giật khi đặt xe xuống.
+#define PWM_MAX 130
+#define OUTPUT_SLEW 3
+#define BALANCE_RAMP_MS 700
+
 #define PWM_MIN 0
+// PWM tối thiểu riêng khi LÙI — motor thường yếu hơn chiều tiến.
+#define PWM_MIN_BACK 22
 
 // 7) Đảo chiều motor.
 //    MOTOR_SIGN  : đảo chiều CHUNG cả 2 bánh (nếu xe đẩy sai hướng -> ngã nhanh hơn)
 //    MOTOR_R/L_SIGN: đảo chiều RIÊNG từng bánh.
-//    >>> XE CỦA BẠN: 1 bánh tiến 1 bánh lùi -> đổi DẤU 1 trong 2 dòng dưới (1 <-> -1)
-#define MOTOR_SIGN   -1
+// MOTOR_SIGN=1 đã đúng hướng nghiêng. Motor TRÁI lắp ngược kênh B trên TB6612 -> L_SIGN=-1.
+#define MOTOR_SIGN    1
 #define MOTOR_R_SIGN  1
 #define MOTOR_L_SIGN -1
 
 // Đảo chiều ĐẾM encoder cho khớp chiều quay thực tế (1 hoặc -1)
 #define ENC_R_SIGN 1
-#define ENC_L_SIGN -1
+#define ENC_L_SIGN  1
 
 // 8) Chu kỳ vòng điều khiển (ms). 5ms = 200Hz, hợp cho cân bằng.
 #define DT_MS 5
@@ -139,6 +151,12 @@ unsigned long lastLoop = 0;
 unsigned long lastPrint = 0;
 
 bool balancing = false;   // cờ: chỉ chạy động cơ khi xe đủ gần thẳng đứng
+unsigned long balanceStartMs = 0;
+float lastPidOutput = 0.0;
+float angleFiltered = 0.0;
+float outputFiltered = 0.0;
+float encPosFiltered = 0.0f;
+float encVelFiltered = 0.0f;
 
 // ----------------- NGẮT ĐẾM ENCODER -----------------
 void IRAM_ATTR isrEncR() {
@@ -282,7 +300,7 @@ void setup() {
   ledcWrite(PWMA, 0);
   ledcWrite(PWMB, 0);
 
-  // Encoder
+  // Encoder. Lưu ý: 34/35 chỉ input, cần trở kéo NGOÀI.
   pinMode(ENC_R_C1, INPUT_PULLUP);
   pinMode(ENC_R_C2, INPUT_PULLUP);
   pinMode(ENC_L_C1, INPUT_PULLUP);
@@ -325,15 +343,25 @@ void loop() {
 
   float angle = getBalanceAngle();
 
-  // --- An toàn: nếu ngã quá ngưỡng thì tắt động cơ, reset tích phân ---
+  // --- An toàn & bật cân bằng (theo ANGLE_SETPOINT, không cộng bias) ---
   if (fabs(angle - ANGLE_SETPOINT) > FALL_LIMIT) {
     balancing = false;
+    balanceStartMs = 0;
+    lastPidOutput = 0.0;
+    outputFiltered = 0.0;
+    encPosFiltered = 0.0f;
+    encVelFiltered = 0.0f;
     pidIntegral = 0;
     setMotors(0, 0);
   } else {
-    // Bật cân bằng lại khi xe được dựng gần thẳng (±3°)
-    if (!balancing && fabs(angle - ANGLE_SETPOINT) < 3.0) {
+    if (!balancing && fabs(angle - ANGLE_SETPOINT) < BALANCE_ENTER_DEG) {
       balancing = true;
+      balanceStartMs = millis();
+      lastPidOutput = 0.0;
+      outputFiltered = 0.0;
+      encPosFiltered = 0.0f;
+      encVelFiltered = 0.0f;
+      angleFiltered = angle;
       pidIntegral = 0;
       encCountR = 0;
       encCountL = 0;
@@ -341,29 +369,53 @@ void loop() {
   }
 
   if (balancing) {
-    // ---------- VÒNG NGOÀI: vị trí/tốc độ từ encoder ----------
-    long pos = encCountR + encCountL;            // tổng quãng đường
+    long pos = encCountR + encCountL;
     static long lastPos = 0;
-    float vel = (pos - lastPos) / dt;            // tốc độ
+    float vel = (pos - lastPos) / dt;
     lastPos = pos;
-    // Vòng ngoài đẩy nhẹ điểm đặt góc để xe không trôi
-    // driveCmd (-100..100) tu ThingsBoard nghieng diem can bang de chay toi/lui
     float driveBias = (driveCmd / 100.0) * MAX_DRIVE_TILT;
-    float setpoint = ANGLE_SETPOINT + driveBias + POS_SIGN * ((Kp_pos * pos) + (Kd_pos * vel));
+    encVelFiltered += ENC_VEL_LPF * (vel - encVelFiltered);
+    encPosFiltered += ENC_POS_LPF * ((float)pos - encPosFiltered);
+    angleFiltered += ANGLE_LPF * (angle - angleFiltered);
+    float setpoint = ANGLE_SETPOINT + FORWARD_TRIM + driveBias
+                   + POS_SIGN * ((Kp_pos * pos) + (Kd_pos * vel));
 
-    // ---------- VÒNG TRONG: PID GÓC ----------
-    float error = setpoint - angle;
-    pidIntegral += error * dt;
-    pidIntegral = constrain(pidIntegral, -300, 300); // chống bão hòa tích phân
-    // D-term lấy từ vận tốc góc gyro (mượt hơn nhiều so với vi phân góc)
+    float error = setpoint - angleFiltered;
+    if (error > 0.3f) pidIntegral += error * dt * 1.3f;
+    else              pidIntegral += error * dt;
+    pidIntegral = constrain(pidIntegral, -120, 500);
     float rate = getBalanceRate();
     lastAngle = angle;
 
     float output = (Kp * error) + (Ki * pidIntegral) - (Kd * rate);
+    if (error > 0.5f) output += REAR_ERROR_GAIN * error;
+    output -= ANTI_DRIFT_KD * encVelFiltered;
+    output -= ANTI_DRIFT_KP * encPosFiltered;
     output *= MOTOR_SIGN;
+
+    float ramp = 1.0f;
+    if (balanceStartMs > 0) {
+      ramp = (float)(now - balanceStartMs) / (float)BALANCE_RAMP_MS;
+      if (ramp > 1.0f) ramp = 1.0f;
+    }
+    output *= ramp;
+
+    outputFiltered += OUTPUT_FILTER * (output - outputFiltered);
+    output = outputFiltered;
+
+    float delta = output - lastPidOutput;
+    if (delta > OUTPUT_SLEW)       output = lastPidOutput + OUTPUT_SLEW;
+    else if (delta < -OUTPUT_SLEW) output = lastPidOutput - OUTPUT_SLEW;
+    lastPidOutput = output;
+
     output = constrain(output, -PWM_MAX, PWM_MAX);
 
     setMotors((int)output, (int)output);
+  } else {
+    lastPidOutput = 0.0;
+    outputFiltered = 0.0;
+    encPosFiltered = 0.0f;
+    encVelFiltered = 0.0f;
   }
 
   // In trạng thái 5 lần/giây (không chặn vòng điều khiển)
@@ -371,6 +423,7 @@ void loop() {
     lastPrint = now;
     Serial.print("Angle: ");  Serial.print(angle, 2);
     Serial.print("\tSet: ");  Serial.print(ANGLE_SETPOINT, 2);
+    Serial.print("\tSP: ");   Serial.print(ANGLE_SETPOINT + FORWARD_TRIM, 2);
     Serial.print("\tEncR: "); Serial.print(encCountR);
     Serial.print("\tEncL: "); Serial.print(encCountL);
     Serial.print("\tDrive: "); Serial.print(driveCmd, 0);
@@ -396,7 +449,9 @@ void driveMotorRight(int speed) {
   speed *= MOTOR_R_SIGN;
   bool forward = (speed >= 0);
   int pwm = abs(speed);
-  if (pwm > 0 && pwm < PWM_MIN) pwm = PWM_MIN;   // vượt deadband
+  if (pwm > 0 && pwm < (forward ? PWM_MIN : PWM_MIN_BACK)) {
+    pwm = forward ? PWM_MIN : PWM_MIN_BACK;
+  }
   pwm = constrain(pwm, 0, PWM_MAX);
 
   if (forward) { digitalWrite(AIN1, HIGH); digitalWrite(AIN2, LOW); }
@@ -408,7 +463,9 @@ void driveMotorLeft(int speed) {
   speed *= MOTOR_L_SIGN;
   bool forward = (speed >= 0);
   int pwm = abs(speed);
-  if (pwm > 0 && pwm < PWM_MIN) pwm = PWM_MIN;
+  if (pwm > 0 && pwm < (forward ? PWM_MIN : PWM_MIN_BACK)) {
+    pwm = forward ? PWM_MIN : PWM_MIN_BACK;
+  }
   pwm = constrain(pwm, 0, PWM_MAX);
 
   if (forward) { digitalWrite(BIN1, HIGH); digitalWrite(BIN2, LOW); }
