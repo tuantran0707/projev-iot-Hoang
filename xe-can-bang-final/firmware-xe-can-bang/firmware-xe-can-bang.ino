@@ -7,12 +7,11 @@
  *
  *  MAP CHÂN:
  *    I2C MPU : SDA=21, SCL=22
- *    TB6612  : PWMA=25 AIN2=26 AIN1=27  (Motor PHẢI)
- *              PWMB=13 BIN1=14 BIN2=12  (Motor TRÁI)   STBY -> 3V3
- *    Encoder PHẢI : C1=33, C2=32
- *    Encoder TRÁI : C1=34, C2=35   (GPIO34/35 chỉ INPUT, KHÔNG có trở kéo nội
- *                                   -> phải gắn TRỞ KÉO LÊN 10k ra 3V3 cho 2 chân này)
- *    Servo   : RIGHT=18, LEFT=19
+ *    TB6612  : PWMA=25 (Motor A/PHẢI)  PWMB=26 (Motor B/TRÁI)
+ *              AIN1=15  AIN2=18  BIN1=4  BIN2=5  STBY=2
+ *    Encoder PHẢI : C1=14, C2=27
+ *    Encoder TRÁI : C1=13, C2=33
+ *    Servo   : RIGHT=19, LEFT=23   (GPIO18 dùng AIN2 -> đổi chân servo)
  * ========================================================================== */
 
 #include <Wire.h>
@@ -45,23 +44,24 @@
 
 // Động cơ Phải (TB6612FNG - kênh A)
 #define PWMA 25
-#define AIN2 26
-#define AIN1 27
+#define AIN1 15
+#define AIN2 18
 
 // Động cơ Trái (TB6612FNG - kênh B)
-#define BIN1 14
-#define BIN2 12
-#define PWMB 13
+#define PWMB 26
+#define BIN1 4
+#define BIN2 5
+#define STBY 2
 
 // Encoder
-#define ENC_R_C1 33
-#define ENC_R_C2 32
-#define ENC_L_C1 34
-#define ENC_L_C2 35
+#define ENC_R_C1 14
+#define ENC_R_C2 27
+#define ENC_L_C1 13
+#define ENC_L_C2 33
 
-// Servo
-#define SERVO_RIGHT_PIN 18
-#define SERVO_LEFT_PIN  19
+// Servo (GPIO18 = AIN2 nên không dùng cho servo)
+#define SERVO_RIGHT_PIN 19
+#define SERVO_LEFT_PIN  23
 
 // ===================== THÔNG SỐ CẦN TINH CHỈNH (TUNE) =====================
 // 1) Chọn TRỤC cân bằng: trục mà GÓC thay đổi NHIỀU khi xe ngả tới/lui.
@@ -272,6 +272,7 @@ void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
 
   // Chân động cơ
+  pinMode(STBY, OUTPUT); digitalWrite(STBY, HIGH);   // bật TB6612
   pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT);
   pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT);
 
@@ -281,11 +282,11 @@ void setup() {
   ledcWrite(PWMA, 0);
   ledcWrite(PWMB, 0);
 
-  // Encoder. Lưu ý: 34/35 chỉ input, cần trở kéo NGOÀI.
+  // Encoder
   pinMode(ENC_R_C1, INPUT_PULLUP);
   pinMode(ENC_R_C2, INPUT_PULLUP);
-  pinMode(ENC_L_C1, INPUT);   // GPIO34: không có pullup nội
-  pinMode(ENC_L_C2, INPUT);   // GPIO35: không có pullup nội
+  pinMode(ENC_L_C1, INPUT_PULLUP);
+  pinMode(ENC_L_C2, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(ENC_R_C1), isrEncR, RISING);
   attachInterrupt(digitalPinToInterrupt(ENC_L_C1), isrEncL, RISING);
 
